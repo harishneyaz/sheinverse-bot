@@ -1,13 +1,13 @@
-import requests, time, re, sys, traceback, atexit
+import requests, time, re, os, atexit
 
-# ===== CONFIG =====
-TOKEN = "PASTE_TOKEN_IN_VARIABLES"   # ⚠️ Railway Variables me daalo
-CHAT_ID = 5480607007
+# ===== ENV CONFIG =====
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 BASE = f"https://api.telegram.org/bot{TOKEN}"
 
 COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
 PRICE_LIMIT = 1020
-POLL_DELAY = 2  # seconds
+POLL_DELAY = 1  # ultra-fast
 
 session = requests.Session()
 session.headers.update({
@@ -15,109 +15,108 @@ session.headers.update({
     "Accept-Language": "en-US,en;q=0.9"
 })
 
-seen = set()
+seen_products = {}   # pid -> last_price
 last_alive = 0
 
-# ---------- STATUS MESSAGE ----------
-def send_status(msg):
+# ---------- TELEGRAM ----------
+def send(msg):
     try:
         requests.post(f"{BASE}/sendMessage", json={
             "chat_id": CHAT_ID,
-            "text": msg,
-            "disable_notification": True
+            "text": msg
         }, timeout=5)
     except:
         pass
 
-# ---------- EXIT / CRASH INDICATOR ----------
+# ---------- EXIT ALERT ----------
 def on_exit():
-    send_status("🔴 VIRUS SO GAYA\n⛔ Bot stopped / crashed")
+    send("🔴 VIRUS SO GAYA\n⛔ Bot stopped / crashed")
 
 atexit.register(on_exit)
 
-# ---------- DEAL ALERT ----------
-def send_alert(pid, price):
-    product_link = f"shein://product/{pid}"
-    coupon_link = "shein://coupon"
-
-    r = requests.post(f"{BASE}/sendMessage", json={
-        "chat_id": CHAT_ID,
-        "text": (
-            "⚡ FIRST SHEINVERSE ALERT\n"
-            f"💰 Price: ₹{price}\n"
-            "👕 Men | Size Ready\n"
-            "Tap & Buy Fast 👇"
-        ),
-        "reply_markup": {
-            "inline_keyboard": [[
-                {"text": "🛒 BUY NOW", "url": product_link},
-                {"text": "🎟️ COUPON", "url": coupon_link}
-            ]]
-        }
-    }).json()
-
-    if "result" in r:
-        requests.post(f"{BASE}/pinChatMessage", data={
-            "chat_id": CHAT_ID,
-            "message_id": r["result"]["message_id"]
-        })
+# ---------- ALERT ----------
+def send_alert(pid, price, category):
+    send(
+        "⚡ FIRST STOCK ALERT\n"
+        f"👕 Category: {category}\n"
+        f"💰 Price: ₹{price}\n"
+        f"🔗 shein://product/{pid}\n"
+        "🔥 FAST BUY"
+    )
 
 # ---------- PRODUCT CHECK ----------
 def check_product(pid):
     try:
         html = session.get(
-            f"https://www.sheinindia.in/p/{pid}", timeout=6
+            f"https://www.sheinindia.in/p/{pid}",
+            timeout=6
         ).text.lower()
+
+        if "out of stock" in html or "sold out" in html:
+            return None
 
         pm = re.search(r'₹\s*(\d+)', html)
         if not pm:
-            return False
+            return None
 
         price = int(pm.group(1))
         if price > PRICE_LIMIT:
-            return False
+            return None
 
-        is_top = any(x in html for x in ["t-shirt", "tshirt", "hoodie", "sweatshirt"])
-        is_bottom = any(x in html for x in ["jeans", "pants", "trouser"])
+        # Categories
+        is_tshirt = any(x in html for x in ["t-shirt", "tshirt"])
+        is_shirt = "shirt" in html and not is_tshirt
+        is_hoodie = "hoodie" in html
+        is_jeans = "jeans" in html
+        is_pants = any(x in html for x in ["pants", "trouser"])
 
-        if is_top and ('"m"' in html or '"l"' in html):
-            return price
-        if is_bottom and ('"30"' in html or '"32"' in html):
-            return price
+        # Topwear sizes
+        if is_tshirt or is_shirt or is_hoodie:
+            if '"m"' in html or '"l"' in html:
+                return price, "Topwear"
+
+        # Bottomwear sizes
+        if is_jeans or is_pants:
+            if '"30"' in html or '"32"' in html:
+                return price, "Bottomwear"
+
+        return None
 
     except:
-        pass
+        return None
 
-    return False
-
-# ---------- MAIN BOT ----------
+# ---------- MAIN ----------
 def main():
     global last_alive
-
-    send_status("☠️ 4EDxVirus Active ☠️\n👀 SHEINVERSE pe nazar...")
+    send("🟢 VIRUS ZINDA HAI\nUltra-fast SHEINVERSE scan started")
 
     while True:
         try:
             html = session.get(COLLECTION_URL, timeout=6).text
             pids = set(re.findall(r'/p/(\d+)', html))
 
-            for pid in pids - seen:
-                price = check_product(pid)
-                if price:
-                    send_alert(pid, price)
-                    seen.add(pid)
+            for pid in pids:
+                result = check_product(pid)
+                if not result:
+                    continue
 
-            # 🔁 Alive ping every 5 minutes
+                price, category = result
+
+                if pid not in seen_products or price < seen_products[pid]:
+                    send_alert(pid, price, category)
+                    seen_products[pid] = price
+
+            # Alive ping every 5 minutes
             if time.time() - last_alive > 300:
-                send_status("🟢 VIRUS ZINDA HAI\nScanning SHEINVERSE...")
+                send("🟢 VIRUS ALIVE\nStill scanning…")
                 last_alive = time.time()
 
-        except Exception as e:
-            send_status("⚠️ BOT ERROR\nRestarting loop...")
+        except:
+            send("⚠️ ERROR\nRetrying…")
             time.sleep(5)
 
-        time.sleep(POLL_DELAY)
+        time.sleep(POLL_DELAY if not seen_products else 2)
 
-# ---------- ENTRY POINT ----------
+# ---------- RUN ----------
 if __name__ == "__main__":
     main()
