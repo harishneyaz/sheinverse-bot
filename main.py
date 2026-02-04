@@ -88,7 +88,7 @@ def check_product(pid):
 # ---------- MAIN ----------
 def main():
     global last_alive
-    send("🟢 VIRUS ZINDA HAI\nUltra-fast SHEINVERSE scan started")
+    send("🟢 VIRUS ZINDA HAI\nShein pr nazar hai")
 
     while True:
         try:
@@ -108,7 +108,7 @@ def main():
 
             # Alive ping every 5 minutes
             if time.time() - last_alive > 300:
-                send("🟢 VIRUS ALIVE\nStill scanning…")
+                send("🟢 VIRUS ALIVE\nScanning…")
                 last_alive = time.time()
 
         except:
