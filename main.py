@@ -1,99 +1,63 @@
-import requests, time, re, os, atexit
+import requests, time, re, os
 
-# ===== ENV CONFIG =====
-TOKEN = os.getenv("TOKEN")           # Railway Variables me daalo
-CHAT_ID = int(os.getenv("CHAT_ID"))  # Telegram ID
-BASE = f"https://api.telegram.org/bot{TOKEN}"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+
+BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
 PRICE_LIMIT = 1020
-POLL_DELAY = 1  # ultra-fast
+DELAY = 3
 
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0",
-    "Accept-Language": "en-US,en;q=0.9"
 })
 
-seen_products = set()   # pid -> sent alert
-last_alive = 0
+seen = set()
 
-# ---------- TELEGRAM ----------
 def send(msg):
-    try:
-        requests.post(f"{BASE}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        }, timeout=3)
-    except:
-        pass
-
-# ---------- EXIT ALERT ----------
-def on_exit():
-    send("🔴 BOT STOPPED / CRASHED")
-
-atexit.register(on_exit)
-
-# ---------- ALERT ----------
-def send_alert(pid, price):
-    send(
-        f"⚡ STOCK ALERT\n"
-        f"💰 Price: ₹{price}\n"
-        f"🔗 shein://product/{pid}\n"
-        f"🔥 TAP FAST"
+    requests.post(
+        f"{BASE}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": msg}
     )
 
-# ---------- PRODUCT CHECK ----------
-def check_product(pid):
-    try:
-        html = session.get(
-            f"https://www.sheinindia.in/p/{pid}", timeout=3
-        ).text.lower()
+send("🚀 SHEINVERSE BOT STARTED")
 
-        if "out of stock" in html or "sold out" in html:
-            return None
+def extract_products(html):
+    return set(re.findall(r'"goods_id":"(\d+)"', html))
 
-        pm = re.search(r'₹\s*(\d+)', html)
-        if not pm:
-            return None
+def check(pid):
+    url = f"https://www.sheinindia.in/p/{pid}"
+    html = session.get(url, timeout=10).text
 
-        price = int(pm.group(1))
-        if price > PRICE_LIMIT:
-            return None
+    # PRICE (JSON)
+    pm = re.search(r'"salePrice":(\d+)', html)
+    if not pm:
+        return False
 
+    price = int(pm.group(1))
+    if price > PRICE_LIMIT:
+        return False
+
+    # SIZE
+    if any(s in html for s in ['"30"','"32"','"m"','"l"']):
         return price
 
-    except:
-        return None
+    return False
 
-# ---------- MAIN ----------
-def main():
-    global last_alive
-    send("🟢 BOT ACTIVE - SHEINVERSE SCANNER")
+while True:
+    try:
+        html = session.get(COLLECTION_URL, timeout=10).text
+        pids = extract_products(html)
 
-    while True:
-        try:
-            html = session.get(COLLECTION_URL, timeout=3).text
-            pids = set(re.findall(r'/p/(\d+)', html))
+        for pid in pids - seen:
+            price = check(pid)
+            if price:
+                send(f"⚡ SHEINVERSE ALERT\n🆔 {pid}\n💰 ₹{price}\n🔥 BUY FAST")
+                seen.add(pid)
 
-            for pid in pids:
-                if pid in seen_products:
-                    continue
+    except Exception as e:
+        send(f"⚠️ ERROR: {e}")
 
-                price = check_product(pid)
-                if price:
-                    send_alert(pid, price)
-                    seen_products.add(pid)
-
-            # Alive ping every 5 mins
-            if time.time() - last_alive > 300:
-                send("🟢 BOT ALIVE - SCANNING...")
-                last_alive = time.time()
-
-        except:
-            time.sleep(1)
-
-        time.sleep(POLL_DELAY)
-
-if __name__ == "__main__":
-    main()
+    time.sleep(DELAY)
