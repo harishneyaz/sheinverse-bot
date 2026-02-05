@@ -37,7 +37,7 @@ if PROXY:
     print(f"[INFO] Using proxy: {PROXY}")
 
 # ================== STATE ==================
-stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock, alert_stock}
+stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock}
 last_heartbeat = datetime.utcnow()
 last_summary = datetime.utcnow() - timedelta(hours=2)
 
@@ -106,9 +106,9 @@ def fetch_product(pid, retries=3):
 
             sku_list = data.get("sku_list", [])
             total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
-            alert_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
+            alert_stock = total_stock  # fixed: include all stock even if is_enable=0
 
-            # Debug prints for troubleshooting
+            # Debug prints
             for s in sku_list:
                 print(f"[DEBUG] PID {pid} SKU {s.get('sku_id')} | stock_qty={s.get('stock_qty')} | is_enable={s.get('is_enable')}")
 
@@ -180,7 +180,7 @@ while True:
 
             _, title, price, img, men_check, women_check, total_stock, alert_stock = result
 
-            # Send Men alerts if buyable stock exists and previously out of stock
+            # Send Men alerts if stock exists and previously out of stock
             if men_check and alert_stock > 0 and not prev_state.get("in_stock", False):
                 tg_product(
                     title=title,
