@@ -31,7 +31,7 @@ session.headers.update({
 # ================== STATE ==================
 stock_state = {}  # pid -> {in_stock, title, price, img, men, women}
 last_heartbeat = datetime.utcnow()
-last_summary = datetime.utcnow() - timedelta(hours=2)  # force first summary
+last_summary = datetime.utcnow() - timedelta(hours=2)
 
 # ================== TELEGRAM ==================
 def tg_text(msg):
@@ -67,21 +67,28 @@ def tg_product(title, price, img, pid, restored=False):
 def tg_summary():
     men_lines = []
     women_lines = []
+    men_count = 0
+    women_count = 0
     for pid, info in stock_state.items():
         if info.get("in_stock"):
             line = f"👕 {info['title'][:50]} | ₹{info['price']}\nhttps://www.sheinindia.in/p/{pid}"
             if info.get("men"):
                 men_lines.append(line)
+                men_count += 1
             else:
                 women_lines.append(line)
+                women_count += 1
 
-    msg = "📊 CURRENT AVAILABLE STOCK:\n\n"
+    msg = f"📊 CURRENT AVAILABLE STOCK:\n\n🧑 MEN ({men_count} items):\n"
     if men_lines:
-        msg += "🧑 MEN:\n" + "\n\n".join(men_lines) + "\n\n"
-    if women_lines:
-        msg += "👩 WOMEN/OTHER:\n" + "\n\n".join(women_lines)
+        msg += "\n\n".join(men_lines)
+    else:
+        msg += "None"
 
-    if not men_lines and not women_lines:
+    msg += f"\n\n👩 WOMEN/OTHER ({women_count} items):\n"
+    if women_lines:
+        msg += "\n\n".join(women_lines)
+    else:
         msg += "None"
 
     tg_text(msg)
@@ -98,7 +105,6 @@ def fetch_product(pid):
     if not data:
         return None
 
-    # SKU-level stock check
     sku_list = data.get("sku_list", [])
     in_stock = False
     for s in sku_list:
@@ -113,7 +119,6 @@ def fetch_product(pid):
     price = int(data["salePrice"]["amount"])
     img = data["goods_img"][0].replace("\\/", "/")
 
-    # Category detection
     text = str(data).lower()
     men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
     women_check = not men_check
@@ -122,7 +127,7 @@ def fetch_product(pid):
 
 # ================== START ==================
 tg_text("🚀 SHEINVERSE BOT STARTED — scanning current stock")
-tg_summary()
+tg_summary()  # Show current stock immediately
 print("BOT RUNNING")
 
 # ================== LOOP ==================
@@ -153,7 +158,7 @@ while True:
 
             _, title, price, img, men_check, women_check = result
 
-            # NEW STOCK or RESTOCK alert (Men only)
+            # Send Men alerts if new stock
             if men_check and not prev_state.get("in_stock", False):
                 tg_product(
                     title=title,
@@ -174,7 +179,7 @@ while True:
             }
 
         print("scan done")
-        time.sleep(1)
+        time.sleep(0.5)  # faster polling to catch flash stock
 
     except Exception as e:
         print("ERROR:", e)
