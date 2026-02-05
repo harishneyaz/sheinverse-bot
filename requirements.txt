@@ -1,3 +1,1 @@
-laiohttp
-python-telegram-bot==20.6
-apscheduler
+requests
