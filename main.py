@@ -29,7 +29,7 @@ session.headers.update({
 })
 
 # ================== STATE ==================
-stock_state = {}  # pid -> {in_stock, title, price, img, men, women}
+stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock}
 last_heartbeat = datetime.utcnow()
 last_summary = datetime.utcnow() - timedelta(hours=2)
 
@@ -70,8 +70,8 @@ def tg_summary():
     men_count = 0
     women_count = 0
     for pid, info in stock_state.items():
-        if info.get("in_stock"):
-            line = f"👕 {info['title'][:50]} | ₹{info['price']}\nhttps://www.sheinindia.in/p/{pid}"
+        if info.get("total_stock", 0) > 0:
+            line = f"👕 {info['title'][:50]} | ₹{info['price']} | Stock: {info['total_stock']}\nhttps://www.sheinindia.in/p/{pid}"
             if info.get("men"):
                 men_lines.append(line)
                 men_count += 1
@@ -80,16 +80,9 @@ def tg_summary():
                 women_count += 1
 
     msg = f"📊 CURRENT AVAILABLE STOCK:\n\n🧑 MEN ({men_count} items):\n"
-    if men_lines:
-        msg += "\n\n".join(men_lines)
-    else:
-        msg += "None"
-
+    msg += "\n\n".join(men_lines) if men_lines else "None"
     msg += f"\n\n👩 WOMEN/OTHER ({women_count} items):\n"
-    if women_lines:
-        msg += "\n\n".join(women_lines)
-    else:
-        msg += "None"
+    msg += "\n\n".join(women_lines) if women_lines else "None"
 
     tg_text(msg)
 
@@ -106,13 +99,12 @@ def fetch_product(pid):
         return None
 
     sku_list = data.get("sku_list", [])
-    in_stock = False
-    for s in sku_list:
-        if s.get("is_enable") == 1 and int(s.get("stock_qty", 0)) > 0:
-            in_stock = True
-            break
+    # Total stock for summary (ignore is_enable)
+    total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
+    # Buyable stock for Men alert
+    alert_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
 
-    if not in_stock:
+    if total_stock <= 0:
         return ("OUT",)
 
     title = data.get("goods_name", "Product")
@@ -123,12 +115,29 @@ def fetch_product(pid):
     men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
     women_check = not men_check
 
-    return ("IN", title, price, img, men_check, women_check)
+    return ("IN", title, price, img, men_check, women_check, total_stock, alert_stock)
 
 # ================== START ==================
 tg_text("🚀 SHEINVERSE BOT STARTED — scanning current stock")
-tg_summary()  # Show current stock immediately
 print("BOT RUNNING")
+
+# Show current stock immediately
+html = session.get(COLLECTION_URL, timeout=10).text
+pids = set(re.findall(r'"goods_id":"(\d+)"', html))
+for pid in pids:
+    result = fetch_product(pid)
+    if result and result[0] == "IN":
+        _, title, price, img, men_check, women_check, total_stock, alert_stock = result
+        stock_state[pid] = {
+            "in_stock": alert_stock > 0,
+            "title": title,
+            "price": price,
+            "img": img,
+            "men": men_check,
+            "women": women_check,
+            "total_stock": total_stock
+        }
+tg_summary()
 
 # ================== LOOP ==================
 while True:
@@ -153,13 +162,13 @@ while True:
 
             prev_state = stock_state.get(pid, {"in_stock": False})
             if result[0] == "OUT":
-                stock_state[pid] = {"in_stock": False}
+                stock_state[pid] = {"in_stock": False, "total_stock": 0}
                 continue
 
-            _, title, price, img, men_check, women_check = result
+            _, title, price, img, men_check, women_check, total_stock, alert_stock = result
 
-            # Send Men alerts if new stock
-            if men_check and not prev_state.get("in_stock", False):
+            # Send Men alerts if buyable stock exists and previously out of stock
+            if men_check and alert_stock > 0 and not prev_state.get("in_stock", False):
                 tg_product(
                     title=title,
                     price=price,
@@ -170,12 +179,13 @@ while True:
 
             # Update state for summary
             stock_state[pid] = {
-                "in_stock": True,
+                "in_stock": alert_stock > 0,
                 "title": title,
                 "price": price,
                 "img": img,
                 "men": men_check,
-                "women": women_check
+                "women": women_check,
+                "total_stock": total_stock
             }
 
         print("scan done")
