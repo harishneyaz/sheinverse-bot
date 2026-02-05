@@ -2,14 +2,14 @@ import requests
 import time
 import os
 import re
-import json
+from datetime import datetime, timedelta
 
 # ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 if not BOT_TOKEN or not CHAT_ID:
-    print("❌ BOT_TOKEN or CHAT_ID missing")
+    print("BOT_TOKEN or CHAT_ID missing")
     while True:
         time.sleep(60)
 
@@ -20,19 +20,18 @@ COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
 DETAIL_API_URL = "https://www.sheinindia.in/api/goods/get-goods-detail"
 
 # ================== SESSION ==================
-HEADERS = {
+session = requests.Session()
+session.headers.update({
     "User-Agent": "Mozilla/5.0 (Android)",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Referer": "https://www.sheinindia.in/"
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
+})
 
 # ================== STATE ==================
-stock_state = {}        # pid -> True / False
-last_heartbeat = 0      # hourly heartbeat
+# pid -> in_stock(True/False)
+stock_state = {}
+last_heartbeat = datetime.utcnow()
 
 # ================== TELEGRAM ==================
 def tg_text(msg):
@@ -41,40 +40,50 @@ def tg_text(msg):
         "text": msg
     })
 
-def tg_product(title, price, img, pid):
+def tg_product(title, price, img, pid, restored=False):
     product_url = f"https://www.sheinindia.in/p/{pid}"
+
+    caption = (
+        "🚨 MEN SHEINVERSE STOCK 🚨\n\n"
+        f"👕 {title[:60]}\n"
+        f"💰 ₹{price}\n\n"
+        f"{'♻️ RESTOCKED' if restored else '⚡ STOCK LIVE'}"
+    )
 
     requests.post(
         f"{TG}/sendPhoto",
         data={
             "chat_id": CHAT_ID,
-            "caption": (
-                "🚨 MEN SHEINVERSE RESTOCK 🚨\n\n"
-                f"👕 {title[:60]}\n"
-                f"💰 ₹{price}\n\n"
-                f"🔗 {product_url}"
-            ),
-            "reply_markup": json.dumps({
-                "inline_keyboard": [[
-                    {"text": "🛒 OPEN PRODUCT", "url": product_url}
-                ]]
-            })
+            "caption": caption
         },
         files={
             "photo": requests.get(img, timeout=10).content
+        },
+        params={
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "🛒 OPEN PRODUCT", "url": product_url}
+                ]]
+            }
         }
     )
 
-# ================== DATA ==================
-def get_product_ids():
-    try:
-        html = session.get(COLLECTION_URL, timeout=10).text
-        return set(re.findall(r'"goods_id":"(\d+)"', html))
-    except:
-        return set()
+# ================== HELPERS ==================
+def is_men_product(api_data: dict) -> bool:
+    """
+    Detect MEN via category data (NOT title).
+    """
+    text = str(api_data).lower()
+    if any(w in text for w in ["women", "girl", "ladies", "kids", "baby"]):
+        return False
+    return "men" in text
 
 def fetch_product(pid):
-    payload = {"goods_id": pid, "country": "IN", "language": "en"}
+    payload = {
+        "goods_id": pid,
+        "country": "IN",
+        "language": "en"
+    }
 
     try:
         r = session.post(DETAIL_API_URL, json=payload, timeout=8).json()
@@ -85,49 +94,65 @@ def fetch_product(pid):
     if not data:
         return None
 
-    title_lower = data.get("goods_name", "").lower()
-
-    # MEN ONLY (hard filter)
-    if not any(x in title_lower for x in ["men", "mens", "man's"]):
-        return None
-    if any(x in title_lower for x in ["women", "kids", "girl", "boy"]):
+    # MEN check (category-based)
+    if not is_men_product(data):
         return None
 
-    # REAL BUYABLE STOCK ONLY
-    for sku in data.get("sku_list", []):
-        if sku.get("is_enable") == 1 and int(sku.get("stock_qty", 0)) > 0:
-            price = int(data["salePrice"]["amount"])
-            img = data["goods_img"][0].replace("\\/", "/")
-            return data["goods_name"], price, img
+    # REAL stock check (SKU-level)
+    sku_list = data.get("sku_list", [])
+    real_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
 
-    return None
+    if real_stock <= 0:
+        return ("OUT", None)
+
+    title = data.get("goods_name", "Men Product")
+    price = int(data["salePrice"]["amount"])
+    img = data["goods_img"][0].replace("\\/", "/")
+
+    return ("IN", title, price, img)
 
 # ================== START ==================
 tg_text("🚀 SHEINVERSE MEN STOCK BOT STARTED")
 print("BOT RUNNING")
 
+# ================== LOOP ==================
 while True:
     try:
-        pids = get_product_ids()
+        # Heartbeat every 1 hour
+        if datetime.utcnow() - last_heartbeat >= timedelta(hours=1):
+            tg_text("✅ BOT RUNNING — monitoring MEN SHEINVERSE stock")
+            last_heartbeat = datetime.utcnow()
+
+        html = session.get(COLLECTION_URL, timeout=10).text
+        pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 
         for pid in pids:
-            product = fetch_product(pid)
+            result = fetch_product(pid)
 
-            prev = stock_state.get(pid, False)
-            curr = bool(product)
+            if not result:
+                continue
 
-            # ALERT ONLY ON OUT -> IN
-            if curr and not prev:
-                title, price, img = product
-                tg_product(title, price, img, pid)
+            prev_state = stock_state.get(pid, False)
 
-            stock_state[pid] = curr
+            if result[0] == "OUT":
+                stock_state[pid] = False
+                continue
 
-        # HEARTBEAT (every 1 hour)
-        if time.time() - last_heartbeat > 3600:
-            tg_text("🟢 SHEIN BOT RUNNING")
-            last_heartbeat = time.time()
+            _, title, price, img = result
 
+            if not prev_state:
+                # NEW STOCK or RESTOCK
+                tg_product(
+                    title=title,
+                    price=price,
+                    img=img,
+                    pid=pid,
+                    restored=(pid in stock_state)
+                )
+
+            stock_state[pid] = True
+
+        print("scan done")
         time.sleep(1)
 
     except Exception as e:
