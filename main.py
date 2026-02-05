@@ -105,8 +105,9 @@ def fetch_product(pid, retries=3):
                 return None
 
             sku_list = data.get("sku_list", [])
-            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
-            alert_stock = total_stock  # fixed: include all stock even if is_enable=0
+            # Only count stock for enabled SKUs (is_enable == 1)
+            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
+            alert_stock = total_stock
 
             # Debug prints
             for s in sku_list:
