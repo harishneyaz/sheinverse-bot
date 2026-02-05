@@ -20,12 +20,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Environment variables (set in Railway)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
-SHEIN_URL = os.getenv('SHEIN_URL', 'https://us.shein.com/Men-c-1969.html')  # Default to men's page; adjust if needed
+SHEIN_URL = os.getenv('SHEIN_URL', 'https://us.shein.com/Shein-Verse-sc-01717425.html')  # Updated default to Shein Verse collection; confirm URL
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # File for storing previous stock
 STOCK_FILE = 'previous_stock.json'
+# File for check counter
+COUNTER_FILE = 'check_counter.json'
+
+def load_counter():
+    if os.path.exists(COUNTER_FILE):
+        with open(COUNTER_FILE, 'r') as f:
+            return json.load(f).get('count', 0)
+    return 0
+
+def save_counter(count):
+    with open(COUNTER_FILE, 'w') as f:
+        json.dump({'count': count}, f)
 
 def load_previous_stock():
     if os.path.exists(STOCK_FILE):
@@ -49,6 +61,7 @@ def setup_driver():
 async def scrape_stock():
     driver = setup_driver()
     try:
+        logging.info("Starting stock scrape for Shein Verse...")
         driver.get(SHEIN_URL)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'product-item')))  # Adjust class if needed
         soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -69,7 +82,7 @@ async def scrape_stock():
             link_elem = product.find('a', href=True)
             buy_link = f"https://us.shein.com{link_elem['href']}" if link_elem else None
             
-            # Focus on men's items
+            # Focus on men's items in Verse
             if 'men' in title.lower():
                 men_count += 1
                 product_id = hash(title)  # Simple ID for tracking
@@ -86,9 +99,10 @@ async def scrape_stock():
                 women_count += 1
         
         summary = {'men': men_count, 'women': women_count, 'products': current_products}
+        logging.info("Stock scrape for Shein Verse completed successfully.")
         return summary, alerts
     except Exception as e:
-        logging.error(f"Scraping error: {e}")
+        logging.error(f"Scraping error for Shein Verse: {e}")
         return load_previous_stock(), []  # Fallback to previous
     finally:
         driver.quit()
@@ -103,23 +117,28 @@ async def send_alert(alerts):
                     with open('temp_img.jpg', 'wb') as f:
                         f.write(img_response.content)
                     with open('temp_img.jpg', 'rb') as f:
-                        bot.send_photo(CHAT_ID, f, caption=f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+                        bot.send_photo(CHAT_ID, f, caption=f"🚨 New/Restocked Men's Item in Shein Verse: {alert['title']}\nBuy: {alert['link']}")
                     os.remove('temp_img.jpg')
                 else:
-                    bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+                    bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item in Shein Verse: {alert['title']}\nBuy: {alert['link']}")
             else:
-                bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+                bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item in Shein Verse: {alert['title']}\nBuy: {alert['link']}")
         except Exception as e:
             logging.error(f"Alert send error: {e}")
 
 async def send_summary(summary):
-    message = f"📊 Current Stock Summary:\nMen: {summary['men']}\nWomen: {summary['women']}"
+    message = f"📊 Current Stock Summary in Shein Verse:\nMen: {summary['men']}\nWomen: {summary['women']}"
     try:
         bot.send_message(CHAT_ID, message)
     except Exception as e:
         logging.error(f"Summary send error: {e}")
 
 async def check_and_alert():
+    global check_count
+    check_count += 1
+    save_counter(check_count)
+    logging.info(f"Check #{check_count} started for Shein Verse.")
+    
     summary, alerts = await scrape_stock()
     prev_summary = load_previous_stock()
     
@@ -132,20 +151,28 @@ async def check_and_alert():
     
     # Save updated stock
     save_stock(summary)
+    logging.info(f"Check #{check_count} completed for Shein Verse. Next check in 30 minutes.")
 
 @bot.message_handler(commands=['start'])
 def start(message):
     asyncio.run(asyncio.sleep(0))  # Ensure async context
-    bot.send_message(message.chat.id, "🤖 Advanced Shein Verse Bot Started! Monitoring men's stock for alerts and summaries.")
+    bot.send_message(message.chat.id, "🤖 Advanced Shein Verse Bot Started! Monitoring Shein Verse collection for men's stock alerts and summaries.")
     asyncio.run(check_and_alert())  # Initial check
 
 async def run_scheduler():
+    global check_count
+    check_count = load_counter()  # Load initial count
+    logging.info(f"Scheduler started with check count: {check_count} for Shein Verse")
+    
     schedule.every(30).minutes.do(lambda: asyncio.create_task(check_and_alert()))  # Faster checks for alerts
     schedule.every(2).hours.do(lambda: asyncio.create_task(send_summary(load_previous_stock())))  # Summary only
     
+    iteration = 0
     while True:
+        iteration += 1
+        logging.info(f"Scheduler iteration #{iteration} running for Shein Verse...")
         schedule.run_pending()
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)  # Check every minute; logs will show if it stops here
 
 if __name__ == "__main__":
     # Start bot polling in a thread
