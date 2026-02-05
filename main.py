@@ -6,99 +6,109 @@ CHAT_ID = os.environ.get("CHAT_ID")
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
-PRICE_LIMIT = 1020
-DELAY = 1.8
+DELAY = 1.0   # max safe speed
 
 session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0"})
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Linux; Android)",
+    "Accept-Language": "en-IN,en;q=0.9"
+})
 
 seen = set()
 
-def send(msg):
-    requests.post(f"{BASE}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg})
+def tg_text(msg):
+    requests.post(f"{BASE}/sendMessage", json={
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "disable_notification": False
+    })
 
-def send_product(pid, price, img):
+def tg_product(pid, price, img, title):
     product = f"https://www.sheinindia.in/p/{pid}"
-    cart = f"shein://cart/add?goods_id={pid}"
 
-    requests.post(
+    r = requests.post(
         f"{BASE}/sendPhoto",
         data={
             "chat_id": CHAT_ID,
             "caption": (
-                "⚡ MEN SHEINVERSE ALERT\n"
-                f"🆔 {pid}\n"
+                "🚨 MEN SHEINVERSE STOCK 🚨\n\n"
+                f"👕 {title[:60]}\n"
                 f"💰 ₹{price}\n\n"
-                "🚀 BUY FAST"
-            )
+                "⚡ CLICK FAST"
+            ),
+            "disable_notification": False
         },
         files={"photo": requests.get(img).content},
         params={
             "reply_markup": {
                 "inline_keyboard": [[
-                    {"text": "🛒 ADD TO CART", "url": cart},
-                    {"text": "🔗 PRODUCT", "url": product}
+                    {"text": "🛒 OPEN PRODUCT", "url": product}
                 ]]
             }
         }
-    )
+    ).json()
 
-send("🚀 MEN SHEINVERSE BOT STARTED")
+    if "result" in r:
+        requests.post(f"{BASE}/pinChatMessage", data={
+            "chat_id": CHAT_ID,
+            "message_id": r["result"]["message_id"]
+        })
 
-def check(pid):
-    html = session.get(
-        f"https://www.sheinindia.in/p/{pid}",
-        timeout=10
-    ).text.lower()
+tg_text("🚀 MEN SHEINVERSE BOT STARTED\n🔔 Alerts ON")
 
-    # ❌ reject women/kids
-    if any(x in html for x in [
-        "women", "girl", "ladies", "kids", "baby"
+def is_men_product(html):
+    # ❌ HARD reject women/kids
+    if any(w in html for w in [
+        "women", "ladies", "girl", "crop", "skirt",
+        "bra", "dress", "kids", "baby"
     ]):
-        return None
+        return False
 
-    # ✅ men check
-    if not any(x in html for x in [
-        "men", "male", "man"
-    ]):
-        return None
-
-    # category
-    if not any(x in html for x in [
-        "t-shirt", "tshirt", "shirt",
+    # ✅ Men clothing keywords (app style)
+    return any(w in html for w in [
+        "men", "t-shirt", "tshirt", "shirt",
         "hoodie", "sweatshirt",
-        "jeans", "pants", "trouser"
-    ]):
+        "jeans", "pants", "trouser",
+        "jacket", "track pant"
+    ])
+
+def check_product(pid):
+    url = f"https://www.sheinindia.in/p/{pid}"
+    html = session.get(url, timeout=8).text.lower()
+
+    if not is_men_product(html):
         return None
 
-    pm = re.search(r'"saleprice":(\d+)', html)
-    if not pm:
+    price_m = re.search(r'"(saleprice|finalprice|price)":\s*"?(\d+)"?', html)
+    img_m = re.search(r'"coverimage":"(https:[^"]+)"', html)
+    title_m = re.search(r'"goods_name":"([^"]+)"', html)
+
+    if not price_m or not img_m:
         return None
 
-    price = int(pm.group(1))
-    if price > PRICE_LIMIT:
-        return None
-
-    im = re.search(r'"coverimage":"(https:[^"]+)"', html)
-    img = im.group(1) if im else None
-
-    return price, img
+    return (
+        int(price_m.group(2)),
+        img_m.group(1),
+        title_m.group(1) if title_m else "Men Clothing"
+    )
 
 try:
     while True:
-        html = session.get(COLLECTION_URL, timeout=10).text
+        html = session.get(COLLECTION_URL, timeout=8).text
         pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 
-        for pid in pids - seen:
-            result = check(pid)
-            if result:
-                price, img = result
-                send_product(pid, price, img)
+        for pid in pids:
+            if pid in seen:
+                continue
+
+            data = check_product(pid)
+            if data:
+                price, img, title = data
+                tg_product(pid, price, img, title)
                 seen.add(pid)
 
         time.sleep(DELAY)
 
 except Exception as e:
-    send(f"❌ BOT STOPPED\n{e}")
+    tg_text(f"❌ BOT STOPPED\n{e}")
     sys.exit(1)
