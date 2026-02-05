@@ -1,186 +1,135 @@
 import asyncio
-import json
-import logging
-import os
-import time
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import telebot
-import schedule
 import requests
 from bs4 import BeautifulSoup
+import telebot
+import os
+import json
+import threading
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Environment variables (set in Railway)
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-CHAT_ID = os.getenv('CHAT_ID')
-SHEIN_URL = os.getenv('SHEIN_URL', 'https://sheinindia.in/sheinverse/c/sverse-5939-37961?srsltid=AfmBOoo3IkxXIYV7-8wbcMa6PRHTTBoWaU6VVPNFOGUL9u0znLslb2s8#filterBy')  # Updated to Shein India Verse URL
+# ----------------------------- CONFIG -----------------------------
+BOT_TOKEN = os.getenv('BOT_TOKEN')  # Telegram bot token
+CHAT_ID = os.getenv('CHAT_ID')      # Your Telegram chat ID
+SHEIN_URL = os.getenv('SHEIN_URL', 'https://sheinindia.in/sheinverse/c/sverse-5939-37961')
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# File for storing previous stock
 STOCK_FILE = 'previous_stock.json'
-# File for check counter
-COUNTER_FILE = 'check_counter.json'
 
-def load_counter():
-    if os.path.exists(COUNTER_FILE):
-        with open(COUNTER_FILE, 'r') as f:
-            return json.load(f).get('count', 0)
-    return 0
-
-def save_counter(count):
-    with open(COUNTER_FILE, 'w') as f:
-        json.dump({'count': count}, f)
-
+# ------------------------ HELPER FUNCTIONS -----------------------
 def load_previous_stock():
+    """Load previously checked stock"""
     if os.path.exists(STOCK_FILE):
         with open(STOCK_FILE, 'r') as f:
             return json.load(f)
-    return {'men': 0, 'women': 0, 'products': {}}
+    return {}
 
 def save_stock(stock):
+    """Save current stock to file"""
     with open(STOCK_FILE, 'w') as f:
         json.dump(stock, f)
 
-def setup_driver():
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
-    return driver
+def fetch_shein_products():
+    """Fetch Shein Verse products using requests + BeautifulSoup"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    r = requests.get(SHEIN_URL, headers=headers)
+    soup = BeautifulSoup(r.text, 'html.parser')
+    
+    products = {}
+    men_count = 0
+    women_count = 0
 
-async def scrape_stock():
-    driver = setup_driver()
-    try:
-        logging.info("Starting stock scrape for Shein India Verse...")
-        driver.get(SHEIN_URL)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'product-item')))  # Adjust class if needed for India site
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+    for item in soup.find_all('div', class_='product-item'):
+        title_elem = item.find('h3') or item.find('a', class_='title')
+        title = title_elem.text.strip() if title_elem else 'Unknown'
         
-        products = soup.find_all('div', class_='product-item')  # Inspect Shein's HTML for exact class
-        men_count = 0
-        women_count = 0
-        current_products = {}
-        alerts = []
+        link_elem = item.find('a', href=True)
+        link = f"https://sheinindia.in{link_elem['href']}" if link_elem else None
+        img_elem = item.find('img')
+        image_url = img_elem['src'] if img_elem else None
+        stock_elem = item.find('span', class_='stock-status') or item.find('div', class_='out-of-stock')
+        status = 'Out of Stock' if stock_elem and 'out' in stock_elem.text.lower() else 'In Stock'
         
-        for product in products:
-            title_elem = product.find('h3') or product.find('a', class_='title')
-            title = title_elem.text.strip() if title_elem else 'Unknown'
-            stock_elem = product.find('span', class_='stock-status') or product.find('div', class_='out-of-stock')
-            stock_status = 'Out of Stock' if stock_elem and 'out' in stock_elem.text.lower() else 'In Stock'
-            image_elem = product.find('img')
-            image_url = image_elem['src'] if image_elem else None
-            link_elem = product.find('a', href=True)
-            buy_link = f"https://sheinindia.in{link_elem['href']}" if link_elem else None
-            
-            # Focus on men's items in Verse
-            if 'men' in title.lower():
-                men_count += 1
-                product_id = hash(title)  # Simple ID for tracking
-                current_products[product_id] = {'title': title, 'status': stock_status, 'image': image_url, 'link': buy_link}
-                
-                prev_status = load_previous_stock().get('products', {}).get(product_id, {}).get('status', 'Out of Stock')
-                if stock_status == 'In Stock' and prev_status != 'In Stock':
-                    alerts.append({
-                        'title': title,
-                        'image': image_url,
-                        'link': buy_link
-                    })
-            elif 'women' in title.lower():
-                women_count += 1
+        # Count men/women
+        if 'men' in title.lower():
+            men_count += 1
+        elif 'women' in title.lower():
+            women_count += 1
         
-        summary = {'men': men_count, 'women': women_count, 'products': current_products}
-        logging.info("Stock scrape for Shein India Verse completed successfully.")
-        return summary, alerts
-    except Exception as e:
-        logging.error(f"Scraping error for Shein India Verse: {e}")
-        return load_previous_stock(), []  # Fallback to previous
-    finally:
-        driver.quit()
+        product_id = link or title
+        products[product_id] = {
+            'title': title, 'status': status, 'link': link, 'image': image_url
+        }
+    
+    return products, men_count, women_count
 
-async def send_alert(alerts):
-    for alert in alerts:
+# ------------------------ MEN ALERTS -----------------------------
+async def men_alert_checker():
+    """Check men’s stock every 1 second and send single combined alert message"""
+    previous_stock = load_previous_stock()
+    
+    while True:
         try:
-            if alert['image']:
-                # Download and send image
-                img_response = requests.get(alert['image'])
-                if img_response.status_code == 200:
-                    with open('temp_img.jpg', 'wb') as f:
-                        f.write(img_response.content)
-                    with open('temp_img.jpg', 'rb') as f:
-                        bot.send_photo(CHAT_ID, f, caption=f"🚨 New/Restocked Men's Item in Shein India Verse: {alert['title']}\nBuy: {alert['link']}")
-                    os.remove('temp_img.jpg')
-                else:
-                    bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item in Shein India Verse: {alert['title']}\nBuy: {alert['link']}")
-            else:
-                bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item in Shein India Verse: {alert['title']}\nBuy: {alert['link']}")
+            current_stock, men_count, women_count = fetch_shein_products()
+            
+            # Find all men’s products that are in stock and were not previously in stock
+            new_men_products = []
+            for pid, info in current_stock.items():
+                prev_status = previous_stock.get(pid, {}).get('status', 'Out of Stock')
+                if info['status'] == 'In Stock' and prev_status != 'In Stock' and 'men' in info['title'].lower():
+                    new_men_products.append(info)
+            
+            # Send a single message for all new men’s products
+            if new_men_products:
+                message_text = "🚨 New/Restocked Men's Products:\n\n"
+                for idx, prod in enumerate(new_men_products, 1):
+                    message_text += f"{idx}. {prod['title']}\nBuy: {prod['link']}\n\n"
+                
+                # Telegram has a 4096 character limit, so we may need to split messages
+                for chunk_start in range(0, len(message_text), 4000):
+                    bot.send_message(CHAT_ID, message_text[chunk_start:chunk_start+4000])
+                
+                # Send images (optional: can also send as media group)
+                for prod in new_men_products:
+                    if prod['image']:
+                        try:
+                            bot.send_photo(CHAT_ID, prod['image'], caption=prod['title'])
+                        except:
+                            continue  # skip if image fails
+            
+            # Update previous stock
+            save_stock(current_stock)
+            previous_stock = current_stock
+            
         except Exception as e:
-            logging.error(f"Alert send error: {e}")
+            print("Error checking Shein:", e)
+        
+        await asyncio.sleep(1)  # 1-second interval
 
-async def send_summary(summary):
-    message = f"📊 Current Stock Summary in Shein India Verse:\nMen: {summary['men']}\nWomen: {summary['women']}"
-    try:
-        bot.send_message(CHAT_ID, message)
-    except Exception as e:
-        logging.error(f"Summary send error: {e}")
+# ------------------------ STOCK SUMMARY --------------------------
+async def summary_sender():
+    """Send stock summary of both men and women every 2 hours"""
+    while True:
+        try:
+            _, men_count, women_count = fetch_shein_products()
+            summary_message = f"📊 Current Stock Summary:\nMen: {men_count}\nWomen: {women_count}"
+            bot.send_message(CHAT_ID, summary_message)
+        except Exception as e:
+            print("Error sending summary:", e)
+        
+        await asyncio.sleep(2 * 60 * 60)  # Every 2 hours
 
-async def check_and_alert():
-    global check_count
-    check_count += 1
-    save_counter(check_count)
-    logging.info(f"Check #{check_count} started for Shein India Verse.")
-    
-    summary, alerts = await scrape_stock()
-    prev_summary = load_previous_stock()
-    
-    # Send alerts for men's changes
-    if alerts:
-        await send_alert(alerts)
-    
-    # Send summary every 2 hours (handled by schedule)
-    await send_summary(summary)
-    
-    # Save updated stock
-    save_stock(summary)
-    logging.info(f"Check #{check_count} completed for Shein India Verse. Next check in 30 minutes.")
-
+# ------------------------ BOT HANDLER ----------------------------
 @bot.message_handler(commands=['start'])
 def start(message):
-    asyncio.run(asyncio.sleep(0))  # Ensure async context
-    bot.send_message(message.chat.id, "🤖 Advanced Shein India Verse Bot Started! Monitoring Shein India Verse collection for men's stock alerts and summaries.")
-    asyncio.run(check_and_alert())  # Initial check
+    bot.send_message(message.chat.id, "🤖 Shein India Verse Bot started!\n"
+                                      "Monitoring men's stock every 1 second and sending 2-hour summaries...")
+    # Run both tasks
+    asyncio.run(asyncio.gather(men_alert_checker(), summary_sender()))
 
-async def run_scheduler():
-    global check_count
-    check_count = load_counter()  # Load initial count
-    logging.info(f"Scheduler started with check count: {check_count} for Shein India Verse")
-    
-    schedule.every(30).minutes.do(lambda: asyncio.create_task(check_and_alert()))  # Faster checks for alerts
-    schedule.every(2).hours.do(lambda: asyncio.create_task(send_summary(load_previous_stock())))  # Summary only
-    
-    iteration = 0
-    while True:
-        iteration += 1
-        logging.info(f"Scheduler iteration #{iteration} running for Shein India Verse...")
-        schedule.run_pending()
-        await asyncio.sleep(60)  # Check every minute; logs will show if it stops here
-
+# ------------------------ MAIN ----------------------------
 if __name__ == "__main__":
-    # Start bot polling in a thread
-    import threading
-    def bot_polling():
-        bot.polling(none_stop=True)
-    
-    threading.Thread(target=bot_polling).start()
-    
-    # Run async scheduler
-    asyncio.run(run_scheduler())
+    # Run bot polling in a separate thread
+    threading.Thread(target=lambda: bot.polling(none_stop=True)).start()
+    # Run async tasks
+    asyncio.run(asyncio.gather(men_alert_checker(), summary_sender()))
