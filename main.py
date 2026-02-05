@@ -29,7 +29,7 @@ session.headers.update({
 })
 
 # ================== STATE ==================
-stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock}
+stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock, alert_stock}
 last_heartbeat = datetime.utcnow()
 last_summary = datetime.utcnow() - timedelta(hours=2)
 
@@ -101,8 +101,12 @@ def fetch_product(pid):
     sku_list = data.get("sku_list", [])
     # Total stock for summary (ignore is_enable)
     total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
-    # Buyable stock for Men alert
+    # Buyable stock for Men alert (is_enable=1)
     alert_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
+
+    # Debug prints to see why stock may differ from app
+    for s in sku_list:
+        print(f"[DEBUG] PID {pid} SKU {s.get('sku_id')} | stock_qty={s.get('stock_qty')} | is_enable={s.get('is_enable')}")
 
     if total_stock <= 0:
         return ("OUT",)
@@ -135,7 +139,8 @@ for pid in pids:
             "img": img,
             "men": men_check,
             "women": women_check,
-            "total_stock": total_stock
+            "total_stock": total_stock,
+            "alert_stock": alert_stock
         }
 tg_summary()
 
@@ -185,7 +190,8 @@ while True:
                 "img": img,
                 "men": men_check,
                 "women": women_check,
-                "total_stock": total_stock
+                "total_stock": total_stock,
+                "alert_stock": alert_stock
             }
 
         print("scan done")
