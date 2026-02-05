@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-PROXY = os.environ.get("PROXY")  # optional, e.g. http://user:pass@host:port
+PROXY = os.environ.get("PROXY")  # optional, e.g., http://user:pass@host:port
 
 if not BOT_TOKEN or not CHAT_ID:
     print("BOT_TOKEN or CHAT_ID missing")
@@ -37,7 +37,7 @@ if PROXY:
     print(f"[INFO] Using proxy: {PROXY}")
 
 # ================== STATE ==================
-stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock}
+stock_state = {}  # pid -> {"in_stock": bool, "title": str, "price": int, "img": str, "men": bool, "total_stock": int}
 last_heartbeat = datetime.utcnow()
 last_summary = datetime.utcnow() - timedelta(hours=2)
 
@@ -69,8 +69,9 @@ def tg_product(title, price, img, pid, restored=False):
             },
             timeout=15
         )
-    except:
-        pass
+        print(f"[ALERT SENT] {title} | PID: {pid} | Price: {price}")
+    except Exception as e:
+        print(f"[ERROR] Sending alert: {e}")
 
 def tg_summary():
     men_lines = []
@@ -87,7 +88,7 @@ def tg_summary():
                 women_lines.append(line)
                 women_count += 1
 
-    msg = f"📊 CURRENT AVAILABLE STOCK:\n\n🧑 MEN ({men_count} items):\n"
+    msg = f"📊 CURRENT STOCK SUMMARY:\n\n🧑 MEN ({men_count} items):\n"
     msg += "\n\n".join(men_lines) if men_lines else "None"
     msg += f"\n\n👩 WOMEN/OTHER ({women_count} items):\n"
     msg += "\n\n".join(women_lines) if women_lines else "None"
@@ -105,16 +106,8 @@ def fetch_product(pid, retries=3):
                 return None
 
             sku_list = data.get("sku_list", [])
-            # Only count stock for enabled SKUs (is_enable == 1)
-            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
-            alert_stock = total_stock
-
-            # Debug prints
-            for s in sku_list:
-                print(f"[DEBUG] PID {pid} SKU {s.get('sku_id')} | stock_qty={s.get('stock_qty')} | is_enable={s.get('is_enable')}")
-
-            if total_stock <= 0:
-                return ("OUT",)
+            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
+            alert_stock = total_stock  # include all stock, even if is_enable=0
 
             title = data.get("goods_name", "Product")
             price = int(data["salePrice"]["amount"])
@@ -122,9 +115,8 @@ def fetch_product(pid, retries=3):
 
             text = str(data).lower()
             men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
-            women_check = not men_check
 
-            return ("IN", title, price, img, men_check, women_check, total_stock, alert_stock)
+            return ("IN", title, price, img, men_check, total_stock, alert_stock)
         except Exception as e:
             print(f"[WARN] PID {pid} attempt {attempt+1} failed: {e}")
             time.sleep(1)
@@ -134,20 +126,19 @@ def fetch_product(pid, retries=3):
 tg_text("🚀 SHEINVERSE BOT STARTED — scanning current stock")
 print("BOT RUNNING")
 
-# Show current stock immediately
+# Initial stock fetch & summary
 html = session.get(COLLECTION_URL, timeout=10, proxies=session.proxies).text
 pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 for pid in pids:
     result = fetch_product(pid)
     if result and result[0] == "IN":
-        _, title, price, img, men_check, women_check, total_stock, alert_stock = result
+        _, title, price, img, men_check, total_stock, alert_stock = result
         stock_state[pid] = {
             "in_stock": alert_stock > 0,
             "title": title,
             "price": price,
             "img": img,
             "men": men_check,
-            "women": women_check,
             "total_stock": total_stock,
             "alert_stock": alert_stock
         }
@@ -156,12 +147,12 @@ tg_summary()
 # ================== LOOP ==================
 while True:
     try:
-        # Heartbeat every 1 hour
+        # Heartbeat every 1h
         if datetime.utcnow() - last_heartbeat >= timedelta(hours=1):
             tg_text("✅ BOT RUNNING — monitoring SHEINVERSE stock")
             last_heartbeat = datetime.utcnow()
 
-        # Summary every 2 hours
+        # Summary every 2h
         if datetime.utcnow() - last_summary >= timedelta(hours=2):
             tg_summary()
             last_summary = datetime.utcnow()
@@ -175,33 +166,25 @@ while True:
                 continue
 
             prev_state = stock_state.get(pid, {"in_stock": False})
-            if result[0] == "OUT":
+            if result[0] == "IN":
+                _, title, price, img, men_check, total_stock, alert_stock = result
+
+                # ALERT: Men stock only, if it was previously out of stock
+                if men_check and alert_stock > 0 and not prev_state.get("in_stock", False):
+                    tg_product(title, price, img, pid, restored=(pid in stock_state))
+
+                # Update stock_state for summary and future alerts
+                stock_state[pid] = {
+                    "in_stock": alert_stock > 0,
+                    "title": title,
+                    "price": price,
+                    "img": img,
+                    "men": men_check,
+                    "total_stock": total_stock,
+                    "alert_stock": alert_stock
+                }
+            else:
                 stock_state[pid] = {"in_stock": False, "total_stock": 0}
-                continue
-
-            _, title, price, img, men_check, women_check, total_stock, alert_stock = result
-
-            # Send Men alerts if stock exists and previously out of stock
-            if men_check and alert_stock > 0 and not prev_state.get("in_stock", False):
-                tg_product(
-                    title=title,
-                    price=price,
-                    img=img,
-                    pid=pid,
-                    restored=(pid in stock_state)
-                )
-
-            # Update state for summary
-            stock_state[pid] = {
-                "in_stock": alert_stock > 0,
-                "title": title,
-                "price": price,
-                "img": img,
-                "men": men_check,
-                "women": women_check,
-                "total_stock": total_stock,
-                "alert_stock": alert_stock
-            }
 
         print("scan done")
         time.sleep(0.5)
