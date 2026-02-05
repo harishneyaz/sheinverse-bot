@@ -1,194 +1,159 @@
-import requests
-import time
+import asyncio
+import json
+import logging
 import os
-import re
-from datetime import datetime, timedelta
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import telebot
+import schedule
+import requests
+from bs4 import BeautifulSoup
 
-# ================== ENV ==================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-PROXY = os.environ.get("PROXY")  # optional, e.g., http://user:pass@host:port
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-if not BOT_TOKEN or not CHAT_ID:
-    print("BOT_TOKEN or CHAT_ID missing")
-    while True:
-        time.sleep(60)
+# Environment variables (set in Railway)
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+CHAT_ID = os.getenv('CHAT_ID')
+SHEIN_URL = os.getenv('SHEIN_URL', 'https://us.shein.com/Men-c-1969.html')  # Default to men's page; adjust if needed
 
-TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# ================== URLS ==================
-COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
-DETAIL_API_URL = "https://www.sheinindia.in/api/goods/get-goods-detail"
+# File for storing previous stock
+STOCK_FILE = 'previous_stock.json'
 
-# ================== SESSION ==================
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Android)",
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Referer": "https://www.sheinindia.in/"
-})
+def load_previous_stock():
+    if os.path.exists(STOCK_FILE):
+        with open(STOCK_FILE, 'r') as f:
+            return json.load(f)
+    return {'men': 0, 'women': 0, 'products': {}}
 
-if PROXY:
-    session.proxies.update({
-        "http": PROXY,
-        "https": PROXY
-    })
-    print(f"[INFO] Using proxy: {PROXY}")
+def save_stock(stock):
+    with open(STOCK_FILE, 'w') as f:
+        json.dump(stock, f)
 
-# ================== STATE ==================
-stock_state = {}  # pid -> {"in_stock": bool, "title": str, "price": int, "img": str, "men": bool, "total_stock": int}
-last_heartbeat = datetime.utcnow()
-last_summary = datetime.utcnow() - timedelta(hours=2)
+def setup_driver():
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+    return driver
 
-# ================== TELEGRAM ==================
-def tg_text(msg):
+async def scrape_stock():
+    driver = setup_driver()
     try:
-        requests.post(f"{TG}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": msg
-        }, timeout=10)
-    except:
-        pass
-
-def tg_product(title, price, img, pid, restored=False):
-    product_url = f"https://www.sheinindia.in/p/{pid}"
-    caption = (
-        "🚨 MEN SHEINVERSE STOCK ALERT 🚨\n\n"
-        f"👕 {title[:60]}\n"
-        f"💰 ₹{price}\n\n"
-        f"{'♻️ RESTOCKED' if restored else '⚡ STOCK LIVE'}"
-    )
-    try:
-        requests.post(
-            f"{TG}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption},
-            files={"photo": requests.get(img, timeout=10, proxies=session.proxies).content},
-            params={
-                "reply_markup": {"inline_keyboard": [[{"text": "🛒 OPEN PRODUCT", "url": product_url}]]}
-            },
-            timeout=15
-        )
-        print(f"[ALERT SENT] {title} | PID: {pid} | Price: {price}")
-    except Exception as e:
-        print(f"[ERROR] Sending alert: {e}")
-
-def tg_summary():
-    men_lines = []
-    women_lines = []
-    men_count = 0
-    women_count = 0
-    for pid, info in stock_state.items():
-        if info.get("total_stock", 0) > 0:
-            line = f"👕 {info['title'][:50]} | ₹{info['price']} | Stock: {info['total_stock']}\nhttps://www.sheinindia.in/p/{pid}"
-            if info.get("men"):
-                men_lines.append(line)
+        driver.get(SHEIN_URL)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'product-item')))  # Adjust class if needed
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        products = soup.find_all('div', class_='product-item')  # Inspect Shein's HTML for exact class
+        men_count = 0
+        women_count = 0
+        current_products = {}
+        alerts = []
+        
+        for product in products:
+            title_elem = product.find('h3') or product.find('a', class_='title')
+            title = title_elem.text.strip() if title_elem else 'Unknown'
+            stock_elem = product.find('span', class_='stock-status') or product.find('div', class_='out-of-stock')
+            stock_status = 'Out of Stock' if stock_elem and 'out' in stock_elem.text.lower() else 'In Stock'
+            image_elem = product.find('img')
+            image_url = image_elem['src'] if image_elem else None
+            link_elem = product.find('a', href=True)
+            buy_link = f"https://us.shein.com{link_elem['href']}" if link_elem else None
+            
+            # Focus on men's items
+            if 'men' in title.lower():
                 men_count += 1
-            else:
-                women_lines.append(line)
+                product_id = hash(title)  # Simple ID for tracking
+                current_products[product_id] = {'title': title, 'status': stock_status, 'image': image_url, 'link': buy_link}
+                
+                prev_status = load_previous_stock().get('products', {}).get(product_id, {}).get('status', 'Out of Stock')
+                if stock_status == 'In Stock' and prev_status != 'In Stock':
+                    alerts.append({
+                        'title': title,
+                        'image': image_url,
+                        'link': buy_link
+                    })
+            elif 'women' in title.lower():
                 women_count += 1
-
-    msg = f"📊 CURRENT STOCK SUMMARY:\n\n🧑 MEN ({men_count} items):\n"
-    msg += "\n\n".join(men_lines) if men_lines else "None"
-    msg += f"\n\n👩 WOMEN/OTHER ({women_count} items):\n"
-    msg += "\n\n".join(women_lines) if women_lines else "None"
-
-    tg_text(msg)
-
-# ================== HELPERS ==================
-def fetch_product(pid, retries=3):
-    payload = {"goods_id": pid, "country": "IN", "language": "en"}
-    for attempt in range(retries):
-        try:
-            r = session.post(DETAIL_API_URL, json=payload, timeout=8, proxies=session.proxies).json()
-            data = r.get("info")
-            if not data:
-                return None
-
-            sku_list = data.get("sku_list", [])
-            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
-            alert_stock = total_stock  # include all stock, even if is_enable=0
-
-            title = data.get("goods_name", "Product")
-            price = int(data["salePrice"]["amount"])
-            img = data["goods_img"][0].replace("\\/", "/")
-
-            text = str(data).lower()
-            men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
-
-            return ("IN", title, price, img, men_check, total_stock, alert_stock)
-        except Exception as e:
-            print(f"[WARN] PID {pid} attempt {attempt+1} failed: {e}")
-            time.sleep(1)
-    return None
-
-# ================== START ==================
-tg_text("🚀 SHEINVERSE BOT STARTED — scanning current stock")
-print("BOT RUNNING")
-
-# Initial stock fetch & summary
-html = session.get(COLLECTION_URL, timeout=10, proxies=session.proxies).text
-pids = set(re.findall(r'"goods_id":"(\d+)"', html))
-for pid in pids:
-    result = fetch_product(pid)
-    if result and result[0] == "IN":
-        _, title, price, img, men_check, total_stock, alert_stock = result
-        stock_state[pid] = {
-            "in_stock": alert_stock > 0,
-            "title": title,
-            "price": price,
-            "img": img,
-            "men": men_check,
-            "total_stock": total_stock,
-            "alert_stock": alert_stock
-        }
-tg_summary()
-
-# ================== LOOP ==================
-while True:
-    try:
-        # Heartbeat every 1h
-        if datetime.utcnow() - last_heartbeat >= timedelta(hours=1):
-            tg_text("✅ BOT RUNNING — monitoring SHEINVERSE stock")
-            last_heartbeat = datetime.utcnow()
-
-        # Summary every 2h
-        if datetime.utcnow() - last_summary >= timedelta(hours=2):
-            tg_summary()
-            last_summary = datetime.utcnow()
-
-        html = session.get(COLLECTION_URL, timeout=10, proxies=session.proxies).text
-        pids = set(re.findall(r'"goods_id":"(\d+)"', html))
-
-        for pid in pids:
-            result = fetch_product(pid)
-            if not result:
-                continue
-
-            prev_state = stock_state.get(pid, {"in_stock": False})
-            if result[0] == "IN":
-                _, title, price, img, men_check, total_stock, alert_stock = result
-
-                # ALERT: Men stock only, if it was previously out of stock
-                if men_check and alert_stock > 0 and not prev_state.get("in_stock", False):
-                    tg_product(title, price, img, pid, restored=(pid in stock_state))
-
-                # Update stock_state for summary and future alerts
-                stock_state[pid] = {
-                    "in_stock": alert_stock > 0,
-                    "title": title,
-                    "price": price,
-                    "img": img,
-                    "men": men_check,
-                    "total_stock": total_stock,
-                    "alert_stock": alert_stock
-                }
-            else:
-                stock_state[pid] = {"in_stock": False, "total_stock": 0}
-
-        print("scan done")
-        time.sleep(0.5)
-
+        
+        summary = {'men': men_count, 'women': women_count, 'products': current_products}
+        return summary, alerts
     except Exception as e:
-        print("ERROR:", e)
-        time.sleep(5)
+        logging.error(f"Scraping error: {e}")
+        return load_previous_stock(), []  # Fallback to previous
+    finally:
+        driver.quit()
+
+async def send_alert(alerts):
+    for alert in alerts:
+        try:
+            if alert['image']:
+                # Download and send image
+                img_response = requests.get(alert['image'])
+                if img_response.status_code == 200:
+                    with open('temp_img.jpg', 'wb') as f:
+                        f.write(img_response.content)
+                    with open('temp_img.jpg', 'rb') as f:
+                        bot.send_photo(CHAT_ID, f, caption=f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+                    os.remove('temp_img.jpg')
+                else:
+                    bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+            else:
+                bot.send_message(CHAT_ID, f"🚨 New/Restocked Men's Item: {alert['title']}\nBuy: {alert['link']}")
+        except Exception as e:
+            logging.error(f"Alert send error: {e}")
+
+async def send_summary(summary):
+    message = f"📊 Current Stock Summary:\nMen: {summary['men']}\nWomen: {summary['women']}"
+    try:
+        bot.send_message(CHAT_ID, message)
+    except Exception as e:
+        logging.error(f"Summary send error: {e}")
+
+async def check_and_alert():
+    summary, alerts = await scrape_stock()
+    prev_summary = load_previous_stock()
+    
+    # Send alerts for men's changes
+    if alerts:
+        await send_alert(alerts)
+    
+    # Send summary every 2 hours (handled by schedule)
+    await send_summary(summary)
+    
+    # Save updated stock
+    save_stock(summary)
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    asyncio.run(asyncio.sleep(0))  # Ensure async context
+    bot.send_message(message.chat.id, "🤖 Advanced Shein Verse Bot Started! Monitoring men's stock for alerts and summaries.")
+    asyncio.run(check_and_alert())  # Initial check
+
+async def run_scheduler():
+    schedule.every(30).minutes.do(lambda: asyncio.create_task(check_and_alert()))  # Faster checks for alerts
+    schedule.every(2).hours.do(lambda: asyncio.create_task(send_summary(load_previous_stock())))  # Summary only
+    
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(60)  # Check every minute
+
+if __name__ == "__main__":
+    # Start bot polling in a thread
+    import threading
+    def bot_polling():
+        bot.polling(none_stop=True)
+    
+    threading.Thread(target=bot_polling).start()
+    
+    # Run async scheduler
+    asyncio.run(run_scheduler())
