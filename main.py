@@ -1,138 +1,128 @@
-import asyncio
-import aiohttp
-import random
-import os
-import sys
-from telegram import Bot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import requests, time, os, re, random
 
-print("🚀 Container booting...")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+if not BOT_TOKEN or not CHAT_ID:
+    print("❌ BOT_TOKEN or CHAT_ID missing")
+    while True:
+        time.sleep(60)
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    print("❌ ENV missing")
-    sys.exit(1)
+TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-print("✅ ENV loaded")
-
-MEN_CAT_ID = "37961"
-WOMEN_CAT_ID = "37960"
-
-CHECK_MIN = 18
-CHECK_MAX = 35
-
-API_URL = "https://api-service.shein.com/v1/goods/list"
+# ✅ REAL SHEIN VERSE URL (PUBLIC)
+COLLECTION_URL = "https://sheinindia.in/sheinverse/c/sverse-5939-37961"
+API_URL = "https://www.sheinindia.in/api/goods/get-goods-detail"
 
 HEADERS = {
-    "user-agent": "Mozilla/5.0",
-    "accept": "application/json"
+    "User-Agent": "Mozilla/5.0 (Android 13)",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Referer": "https://www.sheinindia.in/"
 }
 
-bot = Bot(token=TELEGRAM_TOKEN)
-LAST_STATE = {}
+session = requests.Session()
+session.headers.update(HEADERS)
 
-# ================== STOCK CHECK HELPER ==================
-def is_in_stock(p):
-    if p.get("goods_stock", 0) > 0:
-        return True
-    if p.get("stock_status") == 1:
-        return True
-    if p.get("sale_status") == 1:
-        return True
-    return False
+# pid -> last stock
+stock_cache = {}
 
-# ================== FETCH ==================
-async def fetch_products(cat_id):
-    params = {
-        "cat_id": cat_id,
-        "page": 1,
-        "page_size": 80,
-        "country": "IN",
-        "language": "en",
-        "currency": "INR"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(API_URL, headers=HEADERS, params=params, timeout=20) as r:
-            data = await r.json()
-            return data.get("goods_list", [])
+def tg_text(msg):
+    requests.post(f"{TG}/sendMessage", json={
+        "chat_id": CHAT_ID,
+        "text": msg
+    })
 
-# ================== ALERT ==================
-async def send_alert(p, title):
-    link = f"https://sheinindia.in/{p.get('goods_url','')}"
-    await bot.send_photo(
-        chat_id=CHAT_ID,
-        photo=p.get("goods_img"),
-        caption=f"""{title}
+def tg_product(title, price, img, pid, stock):
+    product = f"https://www.sheinindia.in/p/{pid}"
 
-👕 {p.get('goods_name')}
-💰 ₹{p.get('sale_price')}
-🔗 Buy:
-{link}
-
-⚡ FAST BUY
-"""
+    requests.post(
+        f"{TG}/sendPhoto",
+        json={
+            "chat_id": CHAT_ID,
+            "photo": img,
+            "caption": (
+                "🚨 MEN SHEINVERSE STOCK 🚨\n\n"
+                f"👕 {title[:60]}\n"
+                f"📦 Stock: {stock}\n"
+                f"💰 ₹{price}\n\n"
+                "⚡ JUST DROPPED / RESTOCKED"
+            ),
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "🛒 BUY FAST", "url": product}
+                ]]
+            }
+        }
     )
 
-# ================== MEN CHECK ==================
-async def check_men_stock():
-    products = await fetch_products(MEN_CAT_ID)
+def fetch_product(pid):
+    payload = {"goods_id": pid, "country": "IN", "language": "en"}
 
-    for p in products:
-        pid = p["goods_id"]
-        in_stock = is_in_stock(p)
+    try:
+        r = session.post(API_URL, json=payload, timeout=8).json()
+    except:
+        return None
 
-        if pid not in LAST_STATE:
-            LAST_STATE[pid] = in_stock
-            if in_stock:
-                await send_alert(p, "🆕 NEW MEN STOCK")
-        else:
-            if LAST_STATE[pid] is False and in_stock is True:
-                LAST_STATE[pid] = True
-                await send_alert(p, "🔁 MEN RESTOCK")
+    data = r.get("info")
+    if not data:
+        return None
 
-# ================== SUMMARY ==================
-async def send_summary():
-    men = await fetch_products(MEN_CAT_ID)
-    women = await fetch_products(WOMEN_CAT_ID)
+    title = data.get("goods_name", "")
+    title_l = title.lower()
 
-    men_count = sum(1 for p in men if is_in_stock(p))
-    women_count = sum(1 for p in women if is_in_stock(p))
+    sku_list = data.get("sku_list", [])
+    stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
 
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=f"""📊 SHEIN VERSE LIVE STATUS
+    price = int(data["salePrice"]["amount"])
+    img = data["goods_img"][0].replace("\\/", "/")
 
-👨 Men in stock: {men_count}
-👩 Women in stock: {women_count}
+    return title, title_l, price, img, stock
 
-✅ Data verified from API
-"""
-    )
+# 🔔 BOT START MESSAGE
+tg_text("🚀 SHEINVERSE PRO BOT STARTED\n⚡ Fast • Accurate • MEN Focused")
+print("BOT RUNNING")
 
-# ================== MAIN ==================
-async def main():
-    print("🤖 Bot starting...")
+while True:
+    try:
+        html = session.get(COLLECTION_URL, timeout=10).text
+        pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text="🤖 SHEIN VERSE BOT STARTED\nFetching live stock…"
-    )
+        men_total = 0
+        women_total = 0
 
-    await send_summary()
+        for pid in pids:
+            data = fetch_product(pid)
+            if not data:
+                continue
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_summary, "interval", hours=2)
-    scheduler.start()
+            title, title_l, price, img, stock = data
+            last_stock = stock_cache.get(pid, 0)
 
-    while True:
-        try:
-            await check_men_stock()
-            await asyncio.sleep(random.uniform(CHECK_MIN, CHECK_MAX))
-        except Exception as e:
-            print("⚠️ LOOP ERROR:", e)
-            await asyncio.sleep(15)
+            is_men = any(k in title_l for k in ["men", "mens", "man's"])
 
-if __name__ == "__main__":
-    asyncio.run(main())
+            if stock > 0:
+                if is_men:
+                    men_total += stock
+                else:
+                    women_total += stock
+
+            # 🔥 NEW STOCK OR RESTOCK (MEN ONLY)
+            if is_men and stock > 0 and last_stock == 0:
+                tg_product(title, price, img, pid, stock)
+
+            stock_cache[pid] = stock
+
+        # 📊 SUMMARY (ALWAYS CORRECT)
+        tg_text(
+            "📊 SHEINVERSE LIVE SUMMARY\n\n"
+            f"👔 Men stock: {men_total}\n"
+            f"👗 Women stock: {women_total}"
+        )
+
+        # ⚡ SAFE FAST CHECK (ANTI-BAN)
+        time.sleep(random.uniform(6, 9))
+
+    except Exception as e:
+        print("ERROR:", e)
+        time.sleep(10)
