@@ -1,123 +1,95 @@
-import requests, time, os, random
+import requests, time, os, json, re
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 if not BOT_TOKEN or not CHAT_ID:
-    print("BOT_TOKEN or CHAT_ID missing")
-    while True:
-        time.sleep(60)
+    raise SystemExit("❌ BOT_TOKEN / CHAT_ID missing")
 
 TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-LIST_API = "https://www.sheinindia.in/api/collection/get-products"
-DETAIL_API = "https://www.sheinindia.in/api/goods/get-goods-detail"
+COLLECTION_URL = "https://www.sheinindia.in/sheinverse"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Android)",
-    "Accept": "application/json",
-    "Content-Type": "application/json"
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
+    "Accept": "text/html"
 }
 
-session = requests.Session()
-session.headers.update(HEADERS)
+STATE_FILE = "state.json"
 
-stock_cache = {}
 
-def tg_text(msg):
+def tg_msg(text):
     requests.post(f"{TG}/sendMessage", json={
         "chat_id": CHAT_ID,
-        "text": msg
+        "text": text,
+        "parse_mode": "HTML"
     })
 
-def tg_product(title, price, img, pid, stock):
-    requests.post(
-        f"{TG}/sendPhoto",
-        json={
-            "chat_id": CHAT_ID,
-            "photo": img,
-            "caption": (
-                "🚨 MEN SHEINVERSE RESTOCK 🚨\n\n"
-                f"👕 {title[:60]}\n"
-                f"📦 Stock: {stock}\n"
-                f"💰 ₹{price}"
-            ),
-            "reply_markup": {
-                "inline_keyboard": [[
-                    {"text": "🛒 BUY NOW", "url": f"https://www.sheinindia.in/p/{pid}"}
-                ]]
-            }
-        }
-    )
 
-def fetch_detail(pid):
-    r = session.post(DETAIL_API, json={
-        "goods_id": pid,
-        "country": "IN",
-        "language": "en"
-    }).json()
+def tg_photo(img, caption):
+    requests.post(f"{TG}/sendPhoto", json={
+        "chat_id": CHAT_ID,
+        "photo": img,
+        "caption": caption,
+        "parse_mode": "HTML"
+    })
 
-    info = r.get("info")
-    if not info:
-        return None
 
-    title = info["goods_name"]
-    title_l = title.lower()
+def load_state():
+    if os.path.exists(STATE_FILE):
+        return json.load(open(STATE_FILE))
+    return {}
 
-    stock = sum(int(s["stock_qty"]) for s in info["sku_list"])
-    price = int(info["salePrice"]["amount"])
-    img = info["goods_img"][0].replace("\\/", "/")
 
-    return title, title_l, stock, price, img
+def save_state(data):
+    json.dump(data, open(STATE_FILE, "w"))
 
-tg_text("🚀 SHEINVERSE PRO BOT STARTED")
+
+tg_msg("🤖 <b>SheinVerse MEN Bot Started</b>\nMonitoring LIVE stock…")
+
+state = load_state()
+last_heartbeat = time.time()
 
 while True:
     try:
-        r = session.post(LIST_API, json={
-            "collection_id": "5939",
-            "sub_collection_id": "37961",
-            "page": 1,
-            "page_size": 100,
-            "country": "IN"
-        }).json()
+        html = requests.get(COLLECTION_URL, headers=HEADERS, timeout=15).text
 
-        goods = r.get("info", {}).get("goods", [])
+        # 🔍 Extract embedded JSON product blocks
+        products = re.findall(r'"goods_id":"(\d+)".*?"stock":"(\d+)".*?"goods_name":"(.*?)".*?"goods_img":"(.*?)"', html)
 
         men_total = 0
-        women_total = 0
 
-        for g in goods:
-            pid = g["goods_id"]
-            detail = fetch_detail(pid)
-            if not detail:
-                continue
+        for pid, stock, name, img in products:
+            stock = int(stock)
+            men_total += stock
 
-            title, title_l, stock, price, img = detail
-            last = stock_cache.get(pid, 0)
+            old_stock = state.get(pid, 0)
 
-            is_men = "men" in title_l
+            if stock > 0 and old_stock == 0:
+                link = f"https://www.sheinindia.in/p/{pid}"
 
-            if stock > 0:
-                if is_men:
-                    men_total += stock
-                else:
-                    women_total += stock
+                tg_photo(
+                    img.replace("\\/", "/"),
+                    f"🔥 <b>MEN STOCK ALERT</b>\n\n"
+                    f"👕 {name}\n"
+                    f"📦 Stock: {stock}\n"
+                    f"🛒 <a href='{link}'>BUY NOW</a>"
+                )
 
-            # 🔥 MEN RESTOCK ALERT
-            if is_men and stock > 0 and last == 0:
-                tg_product(title, price, img, pid, stock)
+            state[pid] = stock
 
-            stock_cache[pid] = stock
+        save_state(state)
 
-        tg_text(
-            "📊 SHEINVERSE LIVE SUMMARY\n\n"
-            f"👔 Men stock: {men_total}\n"
-            f"👗 Women stock: {women_total}"
-        )
+        # ❤️ Heartbeat every 2 hours
+        if time.time() - last_heartbeat > 7200:
+            tg_msg(
+                f"💓 <b>Bot Alive</b>\n\n"
+                f"👔 MEN Current Stock: {men_total}"
+            )
+            last_heartbeat = time.time()
 
-        time.sleep(random.uniform(6, 9))
+        time.sleep(15)
 
     except Exception as e:
-        print("ERROR:", e)
-        time.sleep(10)
+        tg_msg(f"⚠️ Error: {e}")
+        time.sleep(30)
