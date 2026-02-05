@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 # ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+PROXY = os.environ.get("PROXY")  # optional, e.g. http://user:pass@host:port
 
 if not BOT_TOKEN or not CHAT_ID:
     print("BOT_TOKEN or CHAT_ID missing")
@@ -27,6 +28,13 @@ session.headers.update({
     "Content-Type": "application/json",
     "Referer": "https://www.sheinindia.in/"
 })
+
+if PROXY:
+    session.proxies.update({
+        "http": PROXY,
+        "https": PROXY
+    })
+    print(f"[INFO] Using proxy: {PROXY}")
 
 # ================== STATE ==================
 stock_state = {}  # pid -> {in_stock, title, price, img, men, women, total_stock, alert_stock}
@@ -55,7 +63,7 @@ def tg_product(title, price, img, pid, restored=False):
         requests.post(
             f"{TG}/sendPhoto",
             data={"chat_id": CHAT_ID, "caption": caption},
-            files={"photo": requests.get(img, timeout=10).content},
+            files={"photo": requests.get(img, timeout=10, proxies=session.proxies).content},
             params={
                 "reply_markup": {"inline_keyboard": [[{"text": "🛒 OPEN PRODUCT", "url": product_url}]]}
             },
@@ -87,46 +95,46 @@ def tg_summary():
     tg_text(msg)
 
 # ================== HELPERS ==================
-def fetch_product(pid):
+def fetch_product(pid, retries=3):
     payload = {"goods_id": pid, "country": "IN", "language": "en"}
-    try:
-        r = session.post(DETAIL_API_URL, json=payload, timeout=8).json()
-    except:
-        return None
+    for attempt in range(retries):
+        try:
+            r = session.post(DETAIL_API_URL, json=payload, timeout=8, proxies=session.proxies).json()
+            data = r.get("info")
+            if not data:
+                return None
 
-    data = r.get("info")
-    if not data:
-        return None
+            sku_list = data.get("sku_list", [])
+            total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
+            alert_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
 
-    sku_list = data.get("sku_list", [])
-    # Total stock for summary (ignore is_enable)
-    total_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list)
-    # Buyable stock for Men alert (is_enable=1)
-    alert_stock = sum(int(s.get("stock_qty", 0)) for s in sku_list if s.get("is_enable") == 1)
+            # Debug prints for troubleshooting
+            for s in sku_list:
+                print(f"[DEBUG] PID {pid} SKU {s.get('sku_id')} | stock_qty={s.get('stock_qty')} | is_enable={s.get('is_enable')}")
 
-    # Debug prints to see why stock may differ from app
-    for s in sku_list:
-        print(f"[DEBUG] PID {pid} SKU {s.get('sku_id')} | stock_qty={s.get('stock_qty')} | is_enable={s.get('is_enable')}")
+            if total_stock <= 0:
+                return ("OUT",)
 
-    if total_stock <= 0:
-        return ("OUT",)
+            title = data.get("goods_name", "Product")
+            price = int(data["salePrice"]["amount"])
+            img = data["goods_img"][0].replace("\\/", "/")
 
-    title = data.get("goods_name", "Product")
-    price = int(data["salePrice"]["amount"])
-    img = data["goods_img"][0].replace("\\/", "/")
+            text = str(data).lower()
+            men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
+            women_check = not men_check
 
-    text = str(data).lower()
-    men_check = "men" in text and not any(w in text for w in ["women", "girl", "ladies", "kids", "baby"])
-    women_check = not men_check
-
-    return ("IN", title, price, img, men_check, women_check, total_stock, alert_stock)
+            return ("IN", title, price, img, men_check, women_check, total_stock, alert_stock)
+        except Exception as e:
+            print(f"[WARN] PID {pid} attempt {attempt+1} failed: {e}")
+            time.sleep(1)
+    return None
 
 # ================== START ==================
 tg_text("🚀 SHEINVERSE BOT STARTED — scanning current stock")
 print("BOT RUNNING")
 
 # Show current stock immediately
-html = session.get(COLLECTION_URL, timeout=10).text
+html = session.get(COLLECTION_URL, timeout=10, proxies=session.proxies).text
 pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 for pid in pids:
     result = fetch_product(pid)
@@ -157,7 +165,7 @@ while True:
             tg_summary()
             last_summary = datetime.utcnow()
 
-        html = session.get(COLLECTION_URL, timeout=10).text
+        html = session.get(COLLECTION_URL, timeout=10, proxies=session.proxies).text
         pids = set(re.findall(r'"goods_id":"(\d+)"', html))
 
         for pid in pids:
@@ -195,7 +203,7 @@ while True:
             }
 
         print("scan done")
-        time.sleep(0.5)  # faster polling to catch flash stock
+        time.sleep(0.5)
 
     except Exception as e:
         print("ERROR:", e)
