@@ -1,1 +1,7 @@
-requests
+pyTelegramBotAPI==4.14.0
+selenium==4.15.2
+webdriver-manager==4.0.1
+requests==2.31.0
+beautifulsoup4==4.12.2
+schedule==1.2.1
+asyncio==3.4.3
