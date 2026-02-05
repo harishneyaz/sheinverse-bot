@@ -1,42 +1,41 @@
-import requests, time, re, os, sys
+import requests, time, os
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = os.environ["CHAT_ID"]
 
-BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 COLLECTION_URL = "https://www.sheinindia.in/collection/SHEINVERSE"
-DELAY = 1.0   # max safe speed
+API_URL = "https://www.sheinindia.in/api/goods/get-goods-detail"
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Linux; Android)",
-    "Accept-Language": "en-IN,en;q=0.9"
-})
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Android)",
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
 
 seen = set()
+session = requests.Session()
+session.headers.update(HEADERS)
 
 def tg_text(msg):
-    requests.post(f"{BASE}/sendMessage", json={
+    requests.post(f"{TG}/sendMessage", json={
         "chat_id": CHAT_ID,
-        "text": msg,
-        "disable_notification": False
+        "text": msg
     })
 
-def tg_product(pid, price, img, title):
+def tg_product(title, price, img, pid):
     product = f"https://www.sheinindia.in/p/{pid}"
 
     r = requests.post(
-        f"{BASE}/sendPhoto",
+        f"{TG}/sendPhoto",
         data={
             "chat_id": CHAT_ID,
-            "caption": (
-                "🚨 MEN SHEINVERSE STOCK 🚨\n\n"
+            "caption":
+                f"🚨 MEN SHEINVERSE STOCK 🚨\n\n"
                 f"👕 {title[:60]}\n"
                 f"💰 ₹{price}\n\n"
-                "⚡ CLICK FAST"
-            ),
-            "disable_notification": False
+                f"⚡ STOCK LIVE",
         },
         files={"photo": requests.get(img).content},
         params={
@@ -48,67 +47,47 @@ def tg_product(pid, price, img, title):
         }
     ).json()
 
-    if "result" in r:
-        requests.post(f"{BASE}/pinChatMessage", data={
-            "chat_id": CHAT_ID,
-            "message_id": r["result"]["message_id"]
-        })
+def fetch_product(pid):
+    payload = {
+        "goods_id": pid
+    }
 
-tg_text("🚀 MEN SHEINVERSE BOT STARTED\n🔔 Alerts ON")
+    r = session.post(API_URL, json=payload, timeout=6).json()
 
-def is_men_product(html):
-    # ❌ HARD reject women/kids
-    if any(w in html for w in [
-        "women", "ladies", "girl", "crop", "skirt",
-        "bra", "dress", "kids", "baby"
-    ]):
-        return False
-
-    # ✅ Men clothing keywords (app style)
-    return any(w in html for w in [
-        "men", "t-shirt", "tshirt", "shirt",
-        "hoodie", "sweatshirt",
-        "jeans", "pants", "trouser",
-        "jacket", "track pant"
-    ])
-
-def check_product(pid):
-    url = f"https://www.sheinindia.in/p/{pid}"
-    html = session.get(url, timeout=8).text.lower()
-
-    if not is_men_product(html):
+    data = r.get("info")
+    if not data:
         return None
 
-    price_m = re.search(r'"(saleprice|finalprice|price)":\s*"?(\d+)"?', html)
-    img_m = re.search(r'"coverimage":"(https:[^"]+)"', html)
-    title_m = re.search(r'"goods_name":"([^"]+)"', html)
-
-    if not price_m or not img_m:
+    # MEN check
+    if "men" not in str(data).lower():
         return None
 
-    return (
-        int(price_m.group(2)),
-        img_m.group(1),
-        title_m.group(1) if title_m else "Men Clothing"
-    )
+    stock = data.get("stock", 0)
+    if stock <= 0:
+        return None
 
-try:
-    while True:
-        html = session.get(COLLECTION_URL, timeout=8).text
-        pids = set(re.findall(r'"goods_id":"(\d+)"', html))
+    price = int(data["salePrice"]["amount"])
+    title = data["goods_name"]
+    img = data["goods_img"][0]
 
-        for pid in pids:
-            if pid in seen:
-                continue
+    return title, price, img
 
-            data = check_product(pid)
-            if data:
-                price, img, title = data
-                tg_product(pid, price, img, title)
-                seen.add(pid)
+tg_text("🚀 SHEIN API STOCK BOT STARTED")
 
-        time.sleep(DELAY)
+while True:
+    html = session.get(COLLECTION_URL).text
+    pids = set(pid for pid in html.split('"goods_id":"')[1:])
 
-except Exception as e:
-    tg_text(f"❌ BOT STOPPED\n{e}")
-    sys.exit(1)
+    for p in pids:
+        pid = p.split('"')[0]
+
+        if pid in seen:
+            continue
+
+        product = fetch_product(pid)
+        if product:
+            title, price, img = product
+            tg_product(title, price, img, pid)
+            seen.add(pid)
+
+    time.sleep(0.8)
