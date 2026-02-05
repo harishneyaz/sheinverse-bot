@@ -1,95 +1,120 @@
-import requests, time, os, json, re
+import os
+import time
+import re
+import requests
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# ================= CONFIG =================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 if not BOT_TOKEN or not CHAT_ID:
-    raise SystemExit("❌ BOT_TOKEN / CHAT_ID missing")
+    print("❌ BOT_TOKEN or CHAT_ID missing")
+    while True:
+        time.sleep(60)
 
-TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-COLLECTION_URL = "https://www.sheinindia.in/sheinverse"
+# SHEINVERSE URLs (Chrome-openable)
+MEN_URL = "https://sheinindia.in/sheinverse/c/sverse-5939-37961"
+WOMEN_URL = "https://sheinindia.in/sheinverse/c/sverse-5939-37960"
+
+CHECK_INTERVAL = 1            # 1 second
+SUMMARY_INTERVAL = 2 * 60 * 60  # 2 hours
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
     "Accept": "text/html"
 }
 
-STATE_FILE = "state.json"
+session = requests.Session()
+session.headers.update(HEADERS)
 
+seen_instock = set()
+last_summary = 0
+# =========================================
 
-def tg_msg(text):
-    requests.post(f"{TG}/sendMessage", json={
+def tg_text(text):
+    requests.post(f"{TG_API}/sendMessage", json={
         "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": text
     })
 
+def tg_photo(img, caption, link):
+    requests.post(
+        f"{TG_API}/sendPhoto",
+        data={
+            "chat_id": CHAT_ID,
+            "caption": caption,
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "🛒 BUY NOW", "url": link}
+                ]]
+            }
+        },
+        files={"photo": requests.get(img, timeout=10).content}
+    )
 
-def tg_photo(img, caption):
-    requests.post(f"{TG}/sendPhoto", json={
-        "chat_id": CHAT_ID,
-        "photo": img,
-        "caption": caption,
-        "parse_mode": "HTML"
-    })
+def extract_products(html):
+    """
+    Website-based parsing (stable)
+    """
+    products = []
+    blocks = re.findall(r'"goods_id":"(\d+)".*?"goods_name":"(.*?)".*?"goods_img":"(.*?)".*?"salePrice":\{"amount":(\d+)\}', html)
+    for pid, name, img, price in blocks:
+        products.append({
+            "id": pid,
+            "name": name.replace("\\u002F", "/"),
+            "img": "https:" + img.replace("\\/", "/"),
+            "price": price
+        })
+    return products
 
+def fetch_page(url):
+    try:
+        return session.get(url, timeout=10).text
+    except:
+        return ""
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
-    return {}
-
-
-def save_state(data):
-    json.dump(data, open(STATE_FILE, "w"))
-
-
-tg_msg("🤖 <b>SheinVerse MEN Bot Started</b>\nMonitoring LIVE stock…")
-
-state = load_state()
-last_heartbeat = time.time()
+# ================= START ==================
+tg_text("🤖 SHEIN Verse Bot Started\n⚡ MEN restock alerts ON\n📊 Summary every 2 hours")
+print("BOT RUNNING")
 
 while True:
     try:
-        html = requests.get(COLLECTION_URL, headers=HEADERS, timeout=15).text
+        men_html = fetch_page(MEN_URL)
+        women_html = fetch_page(WOMEN_URL)
 
-        # 🔍 Extract embedded JSON product blocks
-        products = re.findall(r'"goods_id":"(\d+)".*?"stock":"(\d+)".*?"goods_name":"(.*?)".*?"goods_img":"(.*?)"', html)
+        men_products = extract_products(men_html)
+        women_products = extract_products(women_html)
 
-        men_total = 0
+        men_count = len(men_products)
+        women_count = len(women_products)
 
-        for pid, stock, name, img in products:
-            stock = int(stock)
-            men_total += stock
+        # MEN alerts (new / restock)
+        for p in men_products:
+            if p["id"] not in seen_instock:
+                seen_instock.add(p["id"])
 
-            old_stock = state.get(pid, 0)
-
-            if stock > 0 and old_stock == 0:
-                link = f"https://www.sheinindia.in/p/{pid}"
-
-                tg_photo(
-                    img.replace("\\/", "/"),
-                    f"🔥 <b>MEN STOCK ALERT</b>\n\n"
-                    f"👕 {name}\n"
-                    f"📦 Stock: {stock}\n"
-                    f"🛒 <a href='{link}'>BUY NOW</a>"
+                caption = (
+                    "🚨 MEN SHEINVERSE STOCK 🚨\n\n"
+                    f"👕 {p['name'][:60]}\n"
+                    f"💰 ₹{p['price']}\n\n"
+                    "⚡ STOCK LIVE"
                 )
+                link = f"https://sheinindia.in/p/{p['id']}"
+                tg_photo(p["img"], caption, link)
 
-            state[pid] = stock
-
-        save_state(state)
-
-        # ❤️ Heartbeat every 2 hours
-        if time.time() - last_heartbeat > 7200:
-            tg_msg(
-                f"💓 <b>Bot Alive</b>\n\n"
-                f"👔 MEN Current Stock: {men_total}"
+        # Summary (start + every 2 hours)
+        if time.time() - last_summary > SUMMARY_INTERVAL:
+            tg_text(
+                f"📊 Current Stock Summary\n"
+                f"👔 Men: {men_count}\n"
+                f"👗 Women: {women_count}"
             )
-            last_heartbeat = time.time()
+            last_summary = time.time()
 
-        time.sleep(15)
+        time.sleep(CHECK_INTERVAL)
 
     except Exception as e:
-        tg_msg(f"⚠️ Error: {e}")
-        time.sleep(30)
+        print("ERROR:", e)
+        time.sleep(5)
